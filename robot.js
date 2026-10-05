@@ -15,16 +15,16 @@ const TOOLS = [
   { id: 'erase', icon: '⌫',  title: 'Очистить клетку' },
 ];
 
-const COOKIE_NAME = 'robot_state_v5';
-const MAX_STEPS = 100000;
+const COOKIE_NAME     = 'robot_state_v6';
+const MAX_TICKS       = 1_000;  // общий предохранитель
+const MAX_IDLE_PASSES = 10;         // холостых проходов цикла «повтор» подряд
 
 let N = 12;
-let cells = [];           // текущее состояние { busy, bonus, trace }
+let cells = [];           // { busy, bonus, trace }
 let robot = null;         // { x, y, dir }
 let currentTool = 'busy';
 let score = 0;
 
-// Исходное состояние (для Сброса)
 let initialBusy = [];
 let initialBonus = [];
 
@@ -35,14 +35,14 @@ let runTimer = null;
 let currentLineEl = 0;
 let crashed = false;
 
-const gridEl = document.getElementById('grid');
-const programEl = document.getElementById('program');
-const indicatorEl = document.getElementById('lineIndicator');
-const crashBanner = document.getElementById('crashBanner');
-const statusEl = document.getElementById('status');
-const runBtn  = document.getElementById('runBtn');
-const stepBtn = document.getElementById('stepBtn');
-const resetBtn = document.getElementById('resetBtn');
+const gridEl       = document.getElementById('grid');
+const programEl    = document.getElementById('program');
+const indicatorEl  = document.getElementById('lineIndicator');
+const crashBanner  = document.getElementById('crashBanner');
+const statusEl     = document.getElementById('status');
+const runBtn       = document.getElementById('runBtn');
+const stepBtn      = document.getElementById('stepBtn');
+const resetBtn     = document.getElementById('resetBtn');
 
 /* ============================================================
    ВСПОМОГАТЕЛЬНЫЕ
@@ -101,7 +101,7 @@ function loadState() {
     N = Math.max(2, Math.min(40, s.N | 0));
     document.getElementById('gridSize').value = N;
 
-    cells = Array.from({ length: N }, () => Array.from({ length: N }, () => ({ busy: false, bonus: false, trace: null })));
+    cells        = Array.from({ length: N }, () => Array.from({ length: N }, () => ({ busy: false, bonus: false, trace: null })));
     initialBusy  = Array.from({ length: N }, () => Array.from({ length: N }, () => false));
     initialBonus = Array.from({ length: N }, () => Array.from({ length: N }, () => false));
 
@@ -314,59 +314,132 @@ function parseProgram(src) {
 }
 
 /* ============================================================
-   ИНТЕРПРЕТАТОР
+   ИНТЕРПРЕТАТОР — одна операция за тик
 ============================================================ */
 function newContext() {
-  return { tasks: [ { kind: 'block', nodes: ast, idx: 0 } ], steps: 0, halted: false };
+  return {
+    tasks: [{ kind: 'block', nodes: ast, idx: 0 }],
+    ticks: 0,
+    progress: 0,     // сколько раз робот шагнул/повернулся
+    halted: false,
+    crashed: false,
+  };
 }
 
 function doStep() {
   const ctx = execCtx;
   if (!ctx || ctx.halted) return { ok: false };
-  if (ctx.steps > MAX_STEPS) return { ok: false, error: 'Превышен лимит шагов' };
   if (!robot) return { ok: false, error: 'Робот не установлен на поле' };
 
-  while (ctx.tasks.length) {
-    const top = ctx.tasks[ctx.tasks.length - 1];
-    if (top.kind === 'block') {
-      if (top.idx >= top.nodes.length) { ctx.tasks.pop(); continue; }
-      const node = top.nodes[top.idx];
-      top.idx++;
-      setLineIndicator(node.line);
-      if (node.cmd === 'шаг') return doMoveForward();
-      if (node.cmd === 'право') { robot.dir = (robot.dir + 1) % 4; renderCell(robot.x, robot.y); return { ok: true }; }
-      if (node.cmd === 'лево')  { robot.dir = (robot.dir + 3) % 4; renderCell(robot.x, robot.y); return { ok: true }; }
-      if (node.cmd === 'вперёд' || node.cmd === 'вперед') return doMoveForward();
-      if (node.cmd === 'выход') {
-        let foundLoop = false;
-        while (ctx.tasks.length) {
-          const t = ctx.tasks[ctx.tasks.length - 1];
-          ctx.tasks.pop();
-          if (t.kind === 'loop') { foundLoop = true; break; }
-        }
-        if (!foundLoop) { ctx.halted = true; return { ok: false }; }
-        continue;
-      }
-      if (node.cmd === 'повтор') {
-        ctx.tasks.push({ kind: 'loop', nodes: node.children });
-        ctx.tasks.push({ kind: 'block', nodes: node.children, idx: 0 });
-        continue;
-      }
-      if (node.cmd === 'если') {
-        if (checkCondition(node.args)) {
-          ctx.tasks.push({ kind: 'block', nodes: node.children, idx: 0 });
-        }
-        continue;
-      }
-      continue;
-    }
-    if (top.kind === 'loop') {
-      ctx.tasks.push({ kind: 'block', nodes: top.nodes, idx: 0 });
-      continue;
-    }
+  if (++ctx.ticks > MAX_TICKS) {
+    ctx.halted = true;
+    return { ok: false, error: 'Превышен лимит тиков' };
   }
-  ctx.halted = true;
-  return { ok: false };
+
+  if (!ctx.tasks.length) {
+    ctx.halted = true;
+    return { ok: false };
+  }
+
+  const top = ctx.tasks[ctx.tasks.length - 1];
+
+  /* ---------- BLOCK ---------- */
+  if (top.kind === 'block') {
+    // Тело блока закончилось — снимаем его. Один тик.
+    if (top.idx >= top.nodes.length) {
+      ctx.tasks.pop();
+
+      // Если сняли тело цикла — проверяем прогресс.
+      const parent = ctx.tasks[ctx.tasks.length - 1];
+      if (parent && parent.kind === 'loop') {
+        if (ctx.progress === parent.progressAtStart) {
+          parent.idlePasses = (parent.idlePasses || 0) + 1;
+          if (parent.idlePasses > MAX_IDLE_PASSES) {
+            ctx.halted = true;
+            return { ok: false, error: 'Бесконечный холостой цикл «повтор»' };
+          }
+        } else {
+          parent.idlePasses = 0;
+        }
+      }
+      return { ok: true, tick: 'close-block' };
+    }
+
+    const node = top.nodes[top.idx];
+    setLineIndicator(node.line);
+
+    /* --- шаг / вперёд --- */
+    if (node.cmd === 'шаг' || node.cmd === 'вперёд' || node.cmd === 'вперед') {
+      top.idx++;
+      ctx.progress++;
+      return doMoveForward();
+    }
+    /* --- повороты --- */
+    if (node.cmd === 'право') {
+      top.idx++;
+      ctx.progress++;
+      robot.dir = (robot.dir + 1) % 4;
+      renderCell(robot.x, robot.y);
+      return { ok: true, tick: 'право' };
+    }
+    if (node.cmd === 'лево') {
+      top.idx++;
+      ctx.progress++;
+      robot.dir = (robot.dir + 3) % 4;
+      renderCell(robot.x, robot.y);
+      return { ok: true, tick: 'лево' };
+    }
+    /* --- выход: снимаем стек до ближайшего loop --- */
+    if (node.cmd === 'выход') {
+      top.idx++;
+      let foundLoop = false;
+      while (ctx.tasks.length) {
+        const t = ctx.tasks.pop();
+        if (t.kind === 'loop') { foundLoop = true; break; }
+      }
+      if (!foundLoop) {
+        ctx.halted = true;
+        return { ok: false, error: '«выход» вне цикла' };
+      }
+      return { ok: true, tick: 'выход' };
+    }
+    /* --- повтор: команда выполнена, пушим loop + block --- */
+    if (node.cmd === 'повтор') {
+      top.idx++;
+      ctx.tasks.push({
+        kind: 'loop',
+        nodes: node.children,
+        progressAtStart: ctx.progress,
+        idlePasses: 0,
+      });
+      ctx.tasks.push({ kind: 'block', nodes: node.children, idx: 0 });
+      return { ok: true, tick: 'повтор' };
+    }
+    /* --- если: команда выполнена, при истине пушим блок --- */
+    if (node.cmd === 'если') {
+      top.idx++;
+      const cond = checkCondition(node.args);
+      if (cond) {
+        ctx.tasks.push({ kind: 'block', nodes: node.children, idx: 0 });
+      }
+      return { ok: true, tick: cond ? 'если(true)' : 'если(false)' };
+    }
+    /* --- неизвестная команда --- */
+    top.idx++;
+    return { ok: true, tick: 'skip' };
+  }
+
+  /* ---------- LOOP ---------- */
+  if (top.kind === 'loop') {
+    // Начинаем новую итерацию: пушим тело. Один тик.
+    top.progressAtStart = ctx.progress;
+    ctx.tasks.push({ kind: 'block', nodes: top.nodes, idx: 0 });
+    return { ok: true, tick: 'loop-iter' };
+  }
+
+  // Неизвестный тип — снимаем, чтобы не зациклиться
+  ctx.tasks.pop();
+  return { ok: true, tick: 'pop-unknown' };
 }
 
 function doMoveForward() {
@@ -387,13 +460,13 @@ function doMoveForward() {
   renderCell(oldX, oldY);
   renderCell(robot.x, robot.y);
   updateRobotInfo();
-  return { ok: true };
+  return { ok: true, tick: 'шаг' };
 }
 
 function checkCondition(args) {
-  if (!args.length || !robot) return false;
+  if (!robot) return false;
   const what = args[0].toLowerCase();
-  let dir = robot.dir;
+  let dir = robot.dir
   if (what === 'справа') dir = (robot.dir + 1) % 4;
   else if (what === 'слева') dir = (robot.dir + 3) % 4;
   const d = DIRS[dir];
@@ -461,12 +534,14 @@ function startProgram() {
 function tick() {
   if (!isRunning || !execCtx) return;
   const r = doStep();
+
   if (r.crashed) { triggerCrash(); return; }
-  if (r.error) { finishProgram(r.error); return; }
-  if (!r.ok) { finishProgram(); return; }
-  execCtx.steps++;
-  setStatus(`▶ Выполняется... шагов: ${execCtx.steps}, строка ${currentLineEl}`);
-  runTimer = setTimeout(tick, 500);
+  if (r.error)   { finishProgram(r.error); return; }
+  if (!r.ok)     { finishProgram(); return; }
+
+  const info = r.tick ? ` [${r.tick}]` : '';
+  setStatus(`▶ тик ${execCtx.ticks}, строка ${currentLineEl}${info}`);
+  runTimer = setTimeout(tick, 500);   // 2 тика в секунду
 }
 
 function finishProgram(errorMsg) {
@@ -474,7 +549,7 @@ function finishProgram(errorMsg) {
   clearTimeout(runTimer);
   runBtn.disabled = false;
   if (errorMsg) setStatus('⏹ ' + errorMsg, 'err');
-  else setStatus(`✔ Завершено. Шагов: ${execCtx ? execCtx.steps : 0}, бонусов: ${score}`, 'ok');
+  else setStatus(`✔ Завершено. Тиков: ${execCtx ? execCtx.ticks : 0}, бонусов: ${score}`, 'ok');
   indicatorEl.style.display = 'none';
   currentLineEl = 0;
   saveState();
@@ -515,11 +590,13 @@ function doOneStep() {
     execCtx = newContext();
   }
   const r = doStep();
+
   if (r.crashed) { triggerCrash(); return; }
-  if (r.error) { finishProgram(r.error); return; }
-  if (!r.ok) { finishProgram(); return; }
-  execCtx.steps++;
-  setStatus(`⏭ Шаг ${execCtx.steps}, строка ${currentLineEl}`, 'ok');
+  if (r.error)   { finishProgram(r.error); return; }
+  if (!r.ok)     { finishProgram(); return; }
+
+  const info = r.tick ? ` [${r.tick}]` : '';
+  setStatus(`⏭ тик ${execCtx.ticks}, строка ${currentLineEl}${info}`, 'ok');
 }
 
 function resetExecutionState(clearTraces) {
@@ -542,7 +619,7 @@ function resetExecutionState(clearTraces) {
 /* ============================================================
    КНОПКИ УПРАВЛЕНИЯ
 ============================================================ */
-runBtn.onclick = startProgram;
+runBtn.onclick  = startProgram;
 stepBtn.onclick = doOneStep;
 
 resetBtn.onclick = () => {
@@ -565,7 +642,7 @@ document.getElementById('copyBtn').onclick = async () => {
     let line = '';
     for (let x = 0; x < N; x++) {
       if (isRobotAt(x, y)) {
-        line += (DIRS[robot.dir].ch === '↑') ? 'R' : DIRS[robot.dir].ch;
+        line += DIRS[robot.dir].ch;   // стрелка направления робота
       } else if (cells[y][x].busy) {
         line += 'X';
       } else if (cells[y][x].bonus) {
@@ -608,7 +685,7 @@ document.getElementById('pasteBtn').onclick = async () => {
   let ok = true, errMsg = '';
 
   if (cols < 2 || cols > 40) { ok = false; errMsg = `длина строки = ${cols}, ожидается 2..40`; }
-  if (ok && rows !== cols) { ok = false; errMsg = `${rows}×${cols} — не квадрат N×N`; }
+  if (ok && rows !== cols)   { ok = false; errMsg = `${rows}×${cols} — не квадрат N×N`; }
   if (ok) {
     const allowed = new Set(['.', 'X', 'O', 'R', '↑', '→', '↓', '←', 'x', 'o', 'r', '#']);
     for (let i = 0; i < rows; i++) {
@@ -630,7 +707,7 @@ document.getElementById('pasteBtn').onclick = async () => {
   resetExecutionState(true);
   score = 0; updateScore();
 
-  cells = Array.from({ length: N }, () => Array.from({ length: N }, () => ({ busy: false, bonus: false, trace: null })));
+  cells        = Array.from({ length: N }, () => Array.from({ length: N }, () => ({ busy: false, bonus: false, trace: null })));
   initialBusy  = Array.from({ length: N }, () => Array.from({ length: N }, () => false));
   initialBonus = Array.from({ length: N }, () => Array.from({ length: N }, () => false));
 
@@ -669,7 +746,7 @@ document.getElementById('applySize').onclick = () => {
     N = v;
     resetExecutionState(true);
     score = 0; updateScore();
-    cells = Array.from({ length: N }, () => Array.from({ length: N }, () => ({ busy: false, bonus: false, trace: null })));
+    cells        = Array.from({ length: N }, () => Array.from({ length: N }, () => ({ busy: false, bonus: false, trace: null })));
     initialBusy  = Array.from({ length: N }, () => Array.from({ length: N }, () => false));
     initialBonus = Array.from({ length: N }, () => Array.from({ length: N }, () => false));
     robot = startRobot();
@@ -681,7 +758,7 @@ document.getElementById('applySize').onclick = () => {
 
 document.getElementById('clearGrid').onclick = () => {
   if (isRunning) return;
-  cells = Array.from({ length: N }, () => Array.from({ length: N }, () => ({ busy: false, bonus: false, trace: null })));
+  cells        = Array.from({ length: N }, () => Array.from({ length: N }, () => ({ busy: false, bonus: false, trace: null })));
   initialBusy  = Array.from({ length: N }, () => Array.from({ length: N }, () => false));
   initialBonus = Array.from({ length: N }, () => Array.from({ length: N }, () => false));
   robot = startRobot();
@@ -711,15 +788,16 @@ buildTools();
 const loaded = loadState();
 
 if (!loaded) {
-  cells = Array.from({ length: N }, () => Array.from({ length: N }, () => ({ busy: false, bonus: false, trace: null })));
+  cells        = Array.from({ length: N }, () => Array.from({ length: N }, () => ({ busy: false, bonus: false, trace: null })));
   initialBusy  = Array.from({ length: N }, () => Array.from({ length: N }, () => false));
   initialBonus = Array.from({ length: N }, () => Array.from({ length: N }, () => false));
   robot = startRobot();
 }
 if (!robot) robot = startRobot();
 
+snapshotInitial();   // зафиксировать исходное состояние для кнопки Сброс
 buildGrid();
 updateScore();
 
 if (loaded) setStatus('↻ Состояние восстановлено из cookies.', 'ok');
-else setStatus('Готов. Робот в центре. Скорость: 2 шага/сек.');
+else setStatus('Готов. Робот в центре. Скорость: 2 тика/сек.');

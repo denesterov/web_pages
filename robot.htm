@@ -3,79 +3,161 @@
 <head>
 <meta charset="UTF-8">
 <title>Учебный робот</title>
-<link rel="stylesheet" href="robot.css">
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 12px;
+    font-family: 'Segoe UI', Arial, sans-serif;
+    background: #eef1f4;
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+    min-height: 100vh;
+  }
+  .panel {
+    background: #fff;
+    border: 1px solid #c8cdd2;
+    border-radius: 6px;
+    padding: 10px;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+  }
+  #leftPanel { display: flex; flex-direction: column; gap: 8px; width: 360px; }
+  #codeArea {
+    width: 100%;
+    height: 420px;
+    font-family: 'Courier New', monospace;
+    font-size: 13px;
+    line-height: 18px;
+    border: 1px solid #c8cdd2;
+    border-radius: 4px;
+    padding: 6px;
+    resize: vertical;
+    white-space: pre;
+    overflow: auto;
+    tab-size: 2;
+  }
+  #codeArea:focus { outline: 2px solid #4a90d9; }
+  #codeLines {
+    font-family: 'Courier New', monospace;
+    font-size: 13px;
+    line-height: 18px;
+    white-space: pre;
+    overflow: auto;
+    height: 500px;
+    max-height: 800px;
+    border: 1px solid #c8cdd2;
+    border-radius: 4px;
+    background: #fafbfc;
+    padding: 4px 6px;
+  }
+  .code-line { display: block; }
+  .code-line.active { background: #cfe6ff; font-weight: bold; }
+  #rightPanel { display: flex; flex-direction: column; gap: 10px; }
+  #fieldWrap { position: relative; }
+  #fieldCanvas { display: block; background: #fff; border: 1px solid #c8cdd2; border-radius: 4px; cursor: pointer; }
+  .controls { display: flex; flex-wrap: wrap; gap: 6px; }
+  button {
+    padding: 6px 12px;
+    font-size: 13px;
+    border: 1px solid #a8b0b8;
+    border-radius: 4px;
+    background: linear-gradient(#fdfdfd, #eef1f4);
+    cursor: pointer;
+  }
+  button:hover { background: linear-gradient(#fff, #e3e8ee); }
+  button:active { background: #d8dee5; }
+  button.active { background: #4a90d9; color: #fff; border-color: #3a78b8; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  #status {
+    font-family: 'Courier New', monospace;
+    font-size: 13px;
+    white-space: pre-wrap;
+    min-height: 60px;
+    background: #fafbfc;
+    border: 1px solid #c8cdd2;
+    border-radius: 4px;
+    padding: 6px;
+    line-height: 1.4;
+  }
+  #status.error { color: #c0392b; border-color: #e74c3c; background: #fdecea; }
+  #status.finish { color: #1e8449; border-color: #27ae60; background: #eafaf1; }
+  #hint {
+    font-size: 12px;
+    line-height: 1.5;
+    background: #fafbfc;
+    border: 1px solid #c8cdd2;
+    border-radius: 4px;
+    padding: 8px;
+    max-width: 220px;
+  }
+  #hint h4 { margin: 0 0 6px 0; font-size: 12px; text-transform: uppercase; color: #555; }
+  #hint code {
+    background: #eef1f4;
+    padding: 1px 4px;
+    border-radius: 3px;
+    font-family: 'Courier New', monospace;
+    font-size: 12px;
+  }
+  .row { display: flex; gap: 8px; align-items: flex-start; }
+  #counter {
+    font-family: 'Courier New', monospace;
+    font-size: 14px;
+    font-weight: bold;
+    color: #d35400;
+  }
+  label.chk { font-size: 13px; display: flex; align-items: center; gap: 4px; cursor: pointer; }
+</style>
 </head>
 <body>
-<div id="app">
 
-  <div id="left">
-    <div class="panel">
-      <h3>Инструменты</h3>
-      <div id="tools"></div>
-    </div>
-
-    <div class="panel" style="flex:1;display:flex;flex-direction:column;min-height:0;">
-      <h3>Программа</h3>
-      <div id="progWrap">
-        <div id="lineIndicator"></div>
-        <textarea id="program" spellcheck="false">повтор
-  шаг
-  шаг
-  право
-  если св
-    шаг
-  лево
-выход
-</textarea>
-      </div>
-
-      <div id="controls">
-        <button class="btn primary" id="runBtn">▶ Пуск</button>
-        <button class="btn" id="stepBtn">⏭ Шаг</button>
-        <button class="btn warn" id="resetBtn">⟲ Сброс</button>
-      </div>
-      <div id="status">Готов. Скорость: 2 шага/сек.</div>
-    </div>
+<div id="leftPanel" class="panel">
+  <div class="row">
+    <strong style="font-size:14px">Программа робота</strong>
+    <span style="flex:1"></span>
   </div>
-
-  <div id="help">
-    <h3>Команды</h3>
-    <div class="row"><span class="cmd">шаг</span> <span class="desc">— вперёд</span></div>
-    <div class="row"><span class="cmd">право</span> <span class="desc">— поворот →</span></div>
-    <div class="row"><span class="cmd">лево</span> <span class="desc">— поворот ←</span></div>
-    <div class="row"><span class="cmd">повтор</span> <span class="desc">— бесконечный цикл</span></div>
-    <div class="row"><span class="cmd">выход</span> <span class="desc">— выйти из цикла</span></div>
-    <div class="row"><span class="cmd">если св</span> <span class="desc">— впереди свободно</span></div>
-    <div class="row"><span class="cmd">если св справа</span></div>
-    <div class="row"><span class="cmd">если св слева</span></div>
-    <div class="row" style="margin-top:8px; color:#9aa0b4;">
-      Вложенные команды — отступ 2 пробела.
-    </div>
-    <h3 style="margin-top:10px;">Кнопка Сброс</h3>
-    <div class="row" style="color:#b0b6c5;">
-      Возвращает робота в центр, стирает стрелки, восстанавливает бонусы, обнуляет счёт.
-    </div>
+  <div id="codeLines"></div>
+  <div class="controls">
+    <button id="btnStartStop">▶ Пуск</button>
+    <button id="btnStep">Шаг</button>
+    <button id="btnReset" title="Сбросить выполнение, стереть следы, вернуть бонусы">Сброс</button>
+    <label class="chk"><input type="checkbox" id="chkFast"> Быстрее</label>
   </div>
-
-  <div id="right">
-    <div id="topbar">
-      <span>Размер:</span>
-      <input id="gridSize" type="number" min="2" max="40" value="12">
-      <button class="btn" id="applySize">Применить</button>
-      <button class="btn" id="clearGrid">Очистить</button>
-      <span>|</span>
-      <button class="btn" id="copyBtn" title="Скопировать поле как текст">📋 Копировать</button>
-      <button class="btn" id="pasteBtn" title="Вставить поле из буфера">📥 Вставить</button>
-      <span>|</span>
-      <span id="scoreBox" title="Собрано бонусов">0</span>
-      <span id="robotInfo">робот: —</span>
-    </div>
-    <div id="grid"></div>
-  </div>
-
+  <textarea id="codeArea" spellcheck="false"></textarea>
 </div>
 
-<div id="crashBanner">⚠ АВАРИЯ ⚠</div>
+<div id="rightPanel">
+  <div class="row">
+    <div id="fieldWrap" class="panel">
+      <canvas id="fieldCanvas"></canvas>
+      <div id="status">Готов</div>
+    </div>
+    <div id="hint" class="panel">
+      <h4>Команды</h4>
+      <code>шаг</code> — вперёд<br>
+      <code>право</code> / <code>лево</code> — поворот<br>
+      <code>повтор</code> — беск. цикл<br>
+      <code>выход</code> — выход из цикла<br>
+      <code>если св</code> — клетка впереди свободна<br>
+      <code>если занято</code> — впереди занято<br>
+      <code>если св слева/справа</code><br>
+      <code>если занято слева/справа</code><br>
+      <hr style="border:none;border-top:1px solid #ddd;margin:8px 0">
+      <h4>Поле</h4>
+      <code>S</code> — старт<br>
+      <code>E</code> — финиш<br>
+      <code>X</code> — стена<br>
+      <code>O</code> — бонус<br>
+      <code>.</code> — пусто<br>
+      <hr style="border:none;border-top:1px solid #ddd;margin:8px 0">
+      <b>Бонусов:</b> <span id="counter">0</span>
+    </div>
+  </div>
+  <div class="controls">
+    <button id="btnCopyField">Копировать поле</button>
+    <button id="btnPasteField">Вставить поле</button>
+    <button id="btnRotate">Повернуть робота</button>
+  </div>
+</div>
 
 <script src="robot.js"></script>
 </body>
